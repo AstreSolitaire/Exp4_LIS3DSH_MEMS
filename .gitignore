@@ -1,0 +1,24 @@
+# Keil MDK build intermediates
+MDK-ARM/Exp4_LIS3DSH_MEMS/*
+!MDK-ARM/Exp4_LIS3DSH_MEMS/Exp4_LIS3DSH_MEMS.hex
+!MDK-ARM/Exp4_LIS3DSH_MEMS/Exp4_LIS3DSH_MEMS.bin
+
+# Keil user-specific files
+MDK-ARM/*.uvguix.*
+MDK-ARM/*.lst
+MDK-ARM/build.log
+MDK-ARM/DebugConfig/
+MDK-ARM/RTE/
+
+# CubeMX batch artifacts
+cubemx.log
+gen.txt
+
+# Python
+__pycache__/
+*.pyc
+logs/
+
+# OS
+Thumbs.db
+.DS_Store
