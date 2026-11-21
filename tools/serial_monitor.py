@@ -169,6 +169,8 @@ class SerialMonitor(tk.Tk):
         self.csv_path = None
         self.csv_rows = 0
 
+        self.reconn_enabled = True         # 是否允许自动重连（手动断开后关闭）
+        self.reconn_left = 20
         self._build_ui()
         self._refresh_ports()
         self.after(40, self._poll_queue)
@@ -217,6 +219,13 @@ class SerialMonitor(tk.Tk):
 
         self.lbl_conn = tk.Label(hdr, text="未连接", bg=PANEL, fg=MUT, font=(F_UI, 9))
         self.lbl_conn.pack(side="right", padx=(8, 14))
+
+        self.auto_reconn = tk.BooleanVar(value=True)
+        tk.Checkbutton(hdr, text="自动重连", variable=self.auto_reconn,
+                       bg=PANEL, fg=MUT, selectcolor=PANEL2,
+                       activebackground=PANEL, activeforeground=FG,
+                       font=(F_UI, 9), relief="flat", bd=0, highlightthickness=0,
+                       cursor="hand2").pack(side="right", padx=2)
 
         self.btn_csv = tk.Button(hdr, text="● 记录 CSV", command=self._toggle_csv,
                                  bg=PANEL2, fg=MUT, activebackground=BORDER,
@@ -424,6 +433,7 @@ class SerialMonitor(tk.Tk):
             messagebox.showerror("打开串口失败", f"{port}\n{e}")
             return
         self.connected = True
+        self.reconn_enabled = True
         self.stop_evt.clear()
         self.reader = threading.Thread(target=self._read_loop, args=(self.ser,), daemon=True)
         self.reader.start()
@@ -431,7 +441,7 @@ class SerialMonitor(tk.Tk):
         self.lbl_conn.configure(text=f"已连接 {port} @ {baud}", fg=GRN)
         self._log(f"已连接 {port} @ {baud} 8N1", "ok")
 
-    def _disconnect(self):
+    def _disconnect(self, reason=None):
         self.connected = False
         self.stop_evt.set()
         try:
@@ -442,16 +452,32 @@ class SerialMonitor(tk.Tk):
         self.ser = None
         self.btn_conn.configure(text="连接", bg=ACCENT, activebackground="#2bb8ad")
         self.lbl_conn.configure(text="未连接", fg=MUT)
-        self._log("串口已断开", "warn")
+        if reason:                      # 异常断开：记下原因并自动重连
+            self._log(f"串口异常断开：{reason}", "err")
+            if self.auto_reconn.get():
+                self.reconn_left = 20
+                self.after(2000, self._try_reconnect)
+        else:                           # 手动断开
+            self.reconn_enabled = False
+            self._log("串口已断开", "warn")
 
     def _read_loop(self, ser):
         buf = b""
+        fails = 0
         while not self.stop_evt.is_set():
             try:
                 chunk = ser.read(256)
-            except Exception:
-                self.q.put(("__DISCONNECT__", time.time()))
-                return
+            except Exception as e:
+                fails += 1
+                # 瞬时错误（USB HUB 抖动等）先重试约 3 s，连续失败才判定断开
+                if fails == 1:
+                    self.q.put(("__RXERR__", f"{type(e).__name__}: {e}"))
+                if fails >= 8:
+                    self.q.put(("__DISCONNECT__", str(e)))
+                    return
+                time.sleep(0.3)
+                continue
+            fails = 0
             if not chunk:
                 continue
             self.q.put(("__BYTES__", len(chunk)))
@@ -460,6 +486,34 @@ class SerialMonitor(tk.Tk):
                 raw, buf = buf.split(b"\n", 1)
                 line = raw.decode("utf-8", "replace").rstrip("\r")
                 self.q.put((line, time.time()))
+
+    def _try_reconnect(self):
+        """断开后自动重连：每次重新扫描串口（应对 COM 号变化）"""
+        if self.connected or not self.reconn_enabled:
+            return
+        self._refresh_ports()
+        sel = self.cmb_port.get()
+        if sel:
+            port = sel.split("|")[0].strip()
+            baud = int(self.cmb_baud.get() or 9600)
+            try:
+                self.ser = serial.Serial(port, baud, timeout=0.3)
+                self.connected = True
+                self.stop_evt.clear()
+                self.reader = threading.Thread(target=self._read_loop,
+                                               args=(self.ser,), daemon=True)
+                self.reader.start()
+                self.btn_conn.configure(text="断开", bg=ORG, activebackground="#d98b49")
+                self.lbl_conn.configure(text=f"已连接 {port} @ {baud}", fg=GRN)
+                self._log(f"自动重连成功 {port} @ {baud} 8N1", "ok")
+                return
+            except Exception:
+                pass
+        self.reconn_left -= 1
+        if self.reconn_left > 0:
+            self.after(2000, self._try_reconnect)
+        else:
+            self._log("自动重连失败次数过多，已停止（请手动点连接）", "err")
 
     def _demo_loop(self):
         t = 0
@@ -492,8 +546,10 @@ class SerialMonitor(tk.Tk):
                     continue
                 if line == "__DISCONNECT__":
                     if self.connected:
-                        self._log("串口异常断开（设备被拔出？）", "err")
-                    self._disconnect()
+                        self._disconnect(reason=str(ts))
+                    continue
+                if line == "__RXERR__":
+                    self._log(f"串口瞬时错误，重试中…（{ts}）", "warn")
                     continue
                 self._on_line(line, ts)
         except queue.Empty:
